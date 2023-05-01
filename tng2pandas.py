@@ -7,15 +7,16 @@ import h5py
 
 import illustris_python as ilsim
 site.addsitedir('/Users/ari/Code/')
-#import illustris_sam as ilsam
+import illustris_sam as ilsam
 
 hubble_value = 0.74
 tng_mass_unit = 1.e10
 scsam_mass_unit = 1.e9
 scale_factor = 1.0 #need to set based on snapshot z 
+G_Msunkpc = 4.3e-6 
 
 def generate_sub_volume_list(n):
-    """generates a list of all the subvolumes"""
+    """generates a list of all the subvolumes, used for loading in illustris-sam"""
     subvolume_list = []
     for i in range(n):
         for j in range(n):
@@ -24,31 +25,44 @@ def generate_sub_volume_list(n):
 
     return subvolume_list
 
+def tngdict2df(catalog):
+    '''convert tng group/sub catalog to a pandas data frame'''
+    df = pd.DataFrame()
+    for field in catalog.keys():
+            if catalog[f].ndim > 1:
+                if catalog[f].shape[1]==3: #x,y,z
+                    df[field+'X'] = tmp[:,0]
+                    df[field+'Y'] = tmp[:,1]
+                    df[field+'Z'] = tmp[:,2]
+                elif catalog[f].shape[1]==5: #Gas,DM,_,Stars,BHs
+                    df[field+'_gas'] = tmp[:,0]
+                    df[field+'_dm'] = tmp[:,1]
+                    df[field+'_star'] = tmp[:,4]    
+                    df[field+'_bh'] = tmp[:,2]               
+            else:
+                df[field] = tmp
 
-def load_scsam_halos(base_path, snapshot=99):
+#functions for loading the santa cruz semianalytic catalogs
+def load_scsam_halos(base_path, snapshot=99, N=5):
     """load sam halos returns a pandas dataframe"""
-    sv_list = generate_sub_volume_list(5)
-    sam_halos = ilsam.groupcat.load_snapshot_halos(base_path,
-      snapshot, sv_list, matches=True)
-    mass_fields = [
-     'HalopropMass_ejected','HalopropMcooldot','HalopropMhot',
+    sv_list = generate_sub_volume_list(N)
+    sam_halos = ilsam.groupcat.load_snapshot_halos(base_path, snapshot, sv_list)
+    mass_fields = ['HalopropMass_ejected','HalopropMcooldot','HalopropMhot',
      'HalopropMstar_diffuse','HalopropMvir','HalopropZhot']
     df = pd.DataFrame(sam_halos)
     for f in mass_fields:
-        df[f] = 1000_000_000.0 * df[f]
+        df[f] = scsam_mass_unit * df[f]
 
     return df
 
-
-def load_scsam_galaxies(base_path, snapshot=99):
+def load_scsam_galaxies(base_path, snapshot=99, N=5):
     """load sam galaxies returns a pandas dataframe"""
-    sv_list = generate_sub_volume_list(5)
-    sam_gals = ilsam.groupcat.load_snapshot_subhalos(base_path,
-      snapshot, sv_list, matches=True)
+    sv_list = generate_sub_volume_list(N)
+    sam_gals = ilsam.groupcat.load_snapshot_subhalos(base_path, snapshot, sv_list)
     pos = sam_gals.pop('GalpropPos')
     vel = sam_gals.pop('GalpropVel')
     df = pd.DataFrame(sam_gals)
-    pos_field = ['X', 'Y', 'Z']
+    pos_field = ['X', 'Y', 'Z'] #these are in Mpc
     vel_field = ['Vx', 'Vy', 'Vz']
     for i in range(3):
         df['Galprop' + pos_field[i]] = pos[:, i]
@@ -59,20 +73,19 @@ def load_scsam_galaxies(base_path, snapshot=99):
         'GalpropMstar_merge','GalpropMstrip']
     for f in mass_fields:
         df[f] = scsam_mass_unit * df[f]
-
+    df['GalpropRhalo'] = 1000*df['GalpropRhalo'] #this is in Mpc, convert to kpc
     return df
 
 
-def join_scsam_gals_and_halos(df_gals, df_halos, centrals_only=True):
-    """join the sam galaxy and halo properties into 1 df"""
-    if centrals_only:
-        df_centrals = df_gals.loc[df_gals['GalpropSatType'] == 0]
-        df_centrals.pop('GalpropRfric')
-    else:
-        df_centrals = df_gals
-    df = df_centrals.join(df_halos, on='GalpropHaloIndex_Snapshot')
+def load_scsam_gals_and_halos(base_path, snapshot=99, N=5):
+    """load and combine sc-sam galaxy and halo properties into 1 df"""
+    df_gals = load_scsam_galaxies(base_path, snapshot=snapshot, N=N)
+    df_halos = load_scsam_halos(base_path, snapshot=snapshot, N=N)
+    df = df_gals.merge(df_halos, left_on='GalpropHaloIndex_Snapshot',
+        right_on='HalopropIndex_Snapshot')
     return df
 
+#functions for loading the L-Galaxies semianalytic catalogs
 def load_lgal_galaxies(base_path, snapshot=99):
     '''load the LGal SAM model for TNG, does not include magnitudes'''
     file_path=base_path+'postprocessing/LGalaxies_{:03d}.hdf5'.format(snapshot)
@@ -125,10 +138,11 @@ def join_lgal_dmo(df_gal,dmo_path,snapshot=99):
         df_gal[f] = df_gal[f] / hubble_value
     return df_gal
 
+#load tng simulation catalog files 
 def load_sim_halos(base_path, snapshot=99):
     """create a dataframe of TNG subfind halos"""
-    fields = ['GroupFirstSub','GroupBHMass','GroupMass','GroupNsubs',
-        'GroupPos','GroupVel','Group_M_Crit200', 'Group_M_TopHat200','Group_R_Crit200',
+    fields = ['GroupBHMass','GroupFirstSub','GroupMass','GroupNsubs',
+        'GroupPos','GroupVel','Group_M_Crit200', 'Group_M_TopHat200', 'Group_R_Crit200',
         'Group_R_TopHat200']
     halos = ilsim.groupcat.loadHalos(base_path, snapshot, fields=fields)
     pos = halos.pop('GroupPos')
@@ -136,9 +150,9 @@ def load_sim_halos(base_path, snapshot=99):
     df = pd.DataFrame(halos)
     pos_field = ['X', 'Y', 'Z']
     vel_field = ['Vx', 'Vy', 'Vz']
-    h = 0.704
+
     for i in range(3):
-        df['Group' + pos_field[i]] = pos[:, i] * 0.001 / h
+        df['Group' + pos_field[i]] = pos[:, i] #cMpc
         df['Group' + vel_field[i]] = vel[:, i]
 
     mass_fields = ['GroupBHMass','GroupMass','Group_M_Crit200', 'Group_M_TopHat200']
@@ -147,42 +161,72 @@ def load_sim_halos(base_path, snapshot=99):
     radii_fields = ['Group_R_Crit200','Group_R_TopHat200']
     for f in radii_fields:
             df[f] = df[f] / hubble_value
-
+#    df['GroupBHMdot'] = (tng_mass_unit/ 0.978) * df['GroupBHMdot'] #Msun/Gyr
     print(df.columns.values)
     return df
 
 
 def load_sim_galaxies(base_path, snapshot=99):
     """create a dataframe of TNG subfind galaxies (subhalos)"""
-    fields = ['SubhaloBHMass','SubhaloBHMdot','SubhaloGasMetallicity',
-        'SubhaloGrNr','SubhaloHalfmassRadType','SubhaloMass',
-        'SubhaloMassInMaxRadType','SubhaloParent','SubhaloPos','SubhaloSFRinRad',
-        'SubhaloSpin','SubhaloStarMetallicity','SubhaloVmax','SubhaloVmaxRad']
+    fields = ['SubhaloFlag','SubhaloBHMass','SubhaloBHMdot','SubhaloGasMetallicity',
+        'SubhaloGrNr','SubhaloHalfmassRadType','SubhaloMass','SubhaloMassInMaxRadType',
+        'SubhaloParent','SubhaloPos','SubhaloSFRinRad','SubhaloSpin','SubhaloStarMetallicity',
+        'SubhaloVel','SubhaloVelDisp','SubhaloVmax','SubhaloVmaxRad']
     subs = ilsim.groupcat.loadSubhalos(base_path, snapshot, fields=fields)
+    #pop out fields that are more than 1D
+    count = subs.pop('count') # this is the number of subs
     radii = subs.pop('SubhaloHalfmassRadType')
-    Rgas = radii[:, 0] / hubble_value
-    Rstar = radii[:, 4] / hubble_value
     masses = subs.pop('SubhaloMassInMaxRadType')
-    Mgas = masses[:, 0] * tng_mass_unit / hubble_value
-    Mstar = masses[:, 4] * tng_mass_unit / hubble_value
     pos = subs.pop('SubhaloPos')
+    vel = subs.pop('SubhaloVel')
     spins = subs.pop('SubhaloSpin')
     df = pd.DataFrame(subs)
-    df['SubhaloRgas'] = Rgas
-    df['SubhaloRstar'] = Rstar
-    df['SubhaloMgas'] = Mgas
-    df['SubhaloMstar'] = Mstar
+    df['SubhaloRgas'] = radii[:, 0] * scale_factor / hubble_value 
+    df['SubhaloRstar'] = radii[:, 4] * scale_factor/ hubble_value
+    df['SubhaloMgas'] = masses[:, 0] * tng_mass_unit / hubble_value
+    df['SubhaloMstar'] = masses[:, 4] * tng_mass_unit / hubble_value
     pos_field = ['X', 'Y', 'Z']
+    vel_field = ['Vx', 'Vy', 'Vz']
     spin_field = ['Jx', 'Jy', 'Jz']
     for i in range(3):
-        df['Subhalo' + pos_field[i]] = pos[:, i] * 0.001 / h
-        df['Subhalo' + spin_field[i]] = spins[:, i] / h
+        df['Subhalo' + pos_field[i]] = pos[:, i]  # cMpc/h
+        df['Subhalo' + vel_field[i]] = vel[:,i]
+        df['Subhalo' + spin_field[i]] = spins[:, i] / hubble_value
 
     mass_fields = ['SubhaloBHMass', 'SubhaloMass']
     for f in mass_fields:
         df[f] = df[f] * tng_mass_unit / hubble_value
 
+    df['SubhaloVmaxRad'] = df['SubhaloVmaxRad'] * scale_factor/hubble_value
     print(df.columns.values)
+    return df
+
+def load_sim_gals_and_halos(base_path,snapshot=99):
+    df = load_sim_galaxies(base_path, snapshot=99)
+    fields = ['GroupBHMass','GroupFirstSub','GroupMass','GroupNsubs',
+        'GroupPos','GroupVel','Group_M_Crit200', 'Group_M_TopHat200', 
+        'Group_R_Crit200', 'Group_R_TopHat200']
+    halos = ilsim.groupcat.loadHalos(base_path, snapshot, fields=fields)
+    #identify central galaxies
+    Nhalos = halos.pop('count')
+    central = np.zeros((df.shape)[0], dtype='int')
+    central[halos['GroupFirstSub']] = 1
+    df['SubhaloCentral'] = central
+    pos = halos.pop('GroupPos')
+    vel = halos.pop('GroupVel')
+    pos_field = ['X', 'Y', 'Z']
+    vel_field = ['Vx', 'Vy', 'Vz']
+    df['GroupNsubs'] = halos['GroupNsubs'][df['SubhaloGrNr']]
+    for i in range(3):
+        df['Group' + pos_field[i]] = pos[df['SubhaloGrNr'], i] #cMpc
+        df['Group' + vel_field[i]] = vel[df['SubhaloGrNr'], i]
+    
+    mass_fields = ['GroupBHMass','GroupMass','Group_M_Crit200', 'Group_M_TopHat200']
+    for f in mass_fields:
+        df[f] = halos[f][df['SubhaloGrNr']] * tng_mass_unit / hubble_value
+    radii_fields = ['Group_R_Crit200','Group_R_TopHat200']
+    for f in radii_fields:
+        df[f] = halos[f][df['SubhaloGrNr']] / hubble_value
     return df
 
 def load_sim_dmo(base_path,snapshot=99):
@@ -199,7 +243,7 @@ def load_sim_dmo(base_path,snapshot=99):
     vel_field = ['Vx', 'Vy', 'Vz']
     spin_field = ['Jx', 'Jy', 'Jz'] #for use with Subhalos
     for i in range(3):
-        df_halos['Group' + pos_field[i]] = pos[:, i] * 0.001 / hubble_value
+        df_halos['Group' + pos_field[i]] = pos[:, i] /hubble_value #cMpc
         df_halos['Group' + vel_field[i]] = vel[:, i]
  
     #second load subhalo catalog
@@ -212,7 +256,7 @@ def load_sim_dmo(base_path,snapshot=99):
     spins = subs.pop('SubhaloSpin')
     df_subs = pd.DataFrame(subs)
     for i in range(3):
-        df_subs['Subhalo' + pos_field[i]] = pos[:, i] * 0.001 / hubble_value
+        df_subs['Subhalo' + pos_field[i]] = pos[:, i] / hubble_value #cMpc
         df_subs['Subhalo' + vel_field[i]] = vel[:, i]
         df_subs['Subhalo' + spin_field[i]] = spins[:, i] / hubble_value
     #join the two
@@ -226,21 +270,10 @@ def load_sim_dmo(base_path,snapshot=99):
         df[f] = df[f] / hubble_value
     return df
 
-def join_sim_gals_and_halos(df_subs, df_halos, centrals_only=True):
-    """join the sim galaxy and halo properties into 1 df"""
-    if centrals_only:
-        df_centrals = df_subs.loc[df_subs['SubhaloParent'] == 0]
-    else:
-        df_centrals = df_gals
-    df = df_centrals.join(df_halos, on='SubhaloGrNr', rsuffix='_h')
-    return df
-
-
 def join_sam_and_sim(df_sam, df_sim):
     """join the sam and sim dataframes"""
     df = df_sam.join(df_sim, on='GalpropSubfindIndex_FP', rsuffix='_sim')
     return df
-
 
 def center_distance(df, type='sim'):
     if type == 'gals':
@@ -285,26 +318,36 @@ def main(args):
     --sim and --lgal joins the LGalaxies SAM with the matched simulated galaxies (centrals only)
     --tests flag checks that matching is correct"""
     if args.sam: #sc-sam
-        df_sam_gals = load_sam_galaxies((args.sam), snapshot=(args.s))
-        df_sam_halos = load_sam_halos((args.sam), snapshot=(args.s))
-        df_sam = join_sam_gals_and_halos(df_sam_gals, df_sam_halos)
+        N = {50:6, 100:5, 300:7}
+        df_sam = load_scsam_gals_and_halos(args.sam,N = N[args.boxsize])
+        df_sam['GalpropVvir'] = np.sqrt(G_Msunkpc*df_sam['GalpropMvir']/df_sam['GalpropRhalo'])
+        print('sam catalog: ', df_sam.shape)
         if args.tests:
             print(df_sam.columns.values)
-            axs[0][0].hist((df_sam['GalpropMvir'] - df_sam['HalopropMvir']), bins=100, density=True)
-        df_sam = remove_columns(df_sam, ['GalpropBirthHaloID','GalpropSatType',
-        'GalpropHaloIndex', 'GalpropHaloIndex_Snapshot','GalpropRootHaloID','GalpropMvir',
-        'HalopropHaloID','HalopropIndex','HalopropIndex_Snapshot','HalopropRedshift',
-        'HalopropRockstarHaloID','HalopropRootHaloID', 'HalopropSnapNum'])
+            cents = df_sam['GalpropSatType']==0
+            print("max Mvir diff = {}".format(np.max(df_sam['GalpropMvir'][cents] 
+                 - df_sam['HalopropMvir'][cents])))
+        df_sam = remove_columns(df_sam, ['GalpropBirthHaloID', 'GalpropHaloIndex', 
+            'GalpropHaloIndex_Snapshot','GalpropRootHaloID','GalpropRedshift',
+            'HalopropHaloID','HalopropIndex','HalopropIndex_Snapshot','HalopropRedshift',
+            'HalopropRockstarHaloID','HalopropRootHaloID', 'HalopropSnapNum'])
+        if not args.sim:
+#            df_sam = remove_columns(df_sam, ['GalpropSubfindIndex_DM', 'GalpropSubfindIndex_FP',
+#                'HalopropFoFIndex_DM', 'HalopropFoFIndex_FP'])
+            df_sam.to_hdf(f'all_tng{args.boxsize}-sam.h5', key='s', mode='w')
+      
     if args.sim:
-        df_sim_halos = load_sim_halos(args.sim)
-        df_sim_gals = load_sim_galaxies(args.sim)
-        df_sim = join_sim_gals_and_halos(df_sim_gals, df_sim_halos)
-        df_sim = remove_columns(df_sim, ['GroupFirstSub', 'SubhaloGrNr', 'SubhaloParent'])
+        df_sim = load_sim_gals_and_halos(args.sim, snapshot = args.snapshot)
+        df_sim = remove_columns(df_sim, ['SubhaloGrNr', 'SubhaloParent'])
         print('sim catalog: ', df_sim.shape)
         if args.tests:
-            print(df_sim.column.values)
-            axs[0][1].hist(center_distance(df_sim, type='sim'), bins=100, density=True)
-        df_sim.to_hdf(f'tng{args.boxsize}-sim.h5', key='s', mode='w')
+            print(df_sim.columns.values)
+            cents = df_sim['SubhaloCentral']  == True
+            print(np.max(center_distance(df_sim[cents], type='sim')))
+        
+        df_sim['SubhaloVvir'] = np.sqrt(G_Msunkpc*df_sim['Group_M_Crit200']/df_sim['Group_R_Crit200'])
+        df_sim.to_hdf(f'all_tng{args.boxsize}-sim.h5', key='s', mode='w')
+          
     if args.lgal and args.dmo:
         df_lgal = load_lgal_galaxies(args.lgal)
         df = join_lgal_dmo(df_lgal,args.dmo)
@@ -315,25 +358,21 @@ def main(args):
             print('Number central galaxies with SubhaloParent not zero {}'.format(df['SubhaloParent'][centrals].sum()))
         df = remove_columns(df, ['SubhaloIndex_TNG-Dark','VelX', 'VelY','VelZ',
             'SubhaloVelX', 'SubhaloVelY','SubhaloVelZ', 'SubhaloVmax'])
-        df.to_hdf(f'tng{args.boxsize}-lgal.h5',  key='s', mode='w')
+        df.to_hdf(f'all_tng{args.boxsize}-lgal.h5',  key='s', mode='w')
     elif args.dmo:
         df_dmo = load_sim_dmo(args.dmo)
         df_dmo = remove_columns(df_dmo, ['GroupFirstSub'])
-        df_dmo.to_hdf(f'tng{args.boxsize}-dmo.h5', key='s', mode='w')
-    if args.sam:
-        if args.sim:
-            df = join_sam_and_sim(df_sam, df_sim)
-            df = remove_columns(df, ['GalpropSubfindIndex_DM', 'GalpropSubfindIndex_FP',
-                'HalopropFoFIndex_DM', 'HalopropFoFIndex_FP'])
-            df.to_hdf('tng-match.h5', key='s', mode='w')
-            if args.tests:
-                print(df.columns.values)
-                print('max center distance {}'.format(np.max(center_distance(df, type='gals'))))
-                print('max center distance {}'.format(np.max(center_distance(df, type='halos'))))
-            if args.sam:
-                df_sam = remove_columns(df_sam, ['GalpropSubfindIndex_DM', 'GalpropSubfindIndex_FP',
-                 'HalopropFoFIndex_DM', 'HalopropFoFIndex_FP'])
-                df_sam.to_hdf('tng-sam.h5', key='s', mode='w')
+        df_dmo.to_hdf(f'all_tng{args.boxsize}-dmo.h5', key='s', mode='w')
+
+    if args.sam and args.sim:
+        df = join_sam_and_sim(df_sam, df_sim)
+        df = remove_columns(df, ['GalpropSubfindIndex_DM', 'GalpropSubfindIndex_FP',
+            'HalopropFoFIndex_DM', 'HalopropFoFIndex_FP'])
+        df.to_hdf('all_tng-match.h5', key='s', mode='w')
+        if args.tests:
+            print(df.columns.values)
+            print('max center distance {}'.format(np.max(center_distance(df, type='gals'))))
+            print('max center distance {}'.format(np.max(center_distance(df, type='halos'))))
 
 
 if __name__ == '__main__':
@@ -345,7 +384,7 @@ if __name__ == '__main__':
     Type = parser.add_mutually_exclusive_group()
     Type.add_argument('--halos', action='store_true', default=True, help='Create dataframe using halos (centrals only)')
     Type.add_argument('--gals', action='store_true', default=False, help='Create dataframe using galaxies (satellites included)')
-    parser.add_argument('-s', '--snaphot', default=99, type=int, help='Snapshot to be converted to dataframe (default=99)')
+    parser.add_argument('-s', '--snapshot', default=99, type=int, help='Snapshot to be converted to dataframe (default=99)')
     parser.add_argument('-t', '--tests', action='store_true', default=False, help='Make some plots to check that the matches are correct')
     parser.add_argument('-bs','--boxsize', default=100, type=int, 
                         help='the boxsize (50/100/300) used for labeling output')
