@@ -3,13 +3,14 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 import h5py
 
 import illustris_python as ilsim
 site.addsitedir('/Users/ari/Code/')
 import illustris_sam as ilsam
 
-hubble_value = 0.74
+hubble_value = 0.704
 tng_mass_unit = 1.e10
 scsam_mass_unit = 1.e9
 scale_factor = 1.0 #need to set based on snapshot z 
@@ -29,18 +30,51 @@ def tngdict2df(catalog):
     '''convert tng group/sub catalog to a pandas data frame'''
     df = pd.DataFrame()
     for field in catalog.keys():
-            if catalog[f].ndim > 1:
-                if catalog[f].shape[1]==3: #x,y,z
+            tmp = catalog[field][()]
+            if tmp.ndim > 1:
+                if tmp.shape[1]==3: #x,y,z
                     df[field+'X'] = tmp[:,0]
                     df[field+'Y'] = tmp[:,1]
                     df[field+'Z'] = tmp[:,2]
-                elif catalog[f].shape[1]==5: #Gas,DM,_,Stars,BHs
-                    df[field+'_gas'] = tmp[:,0]
-                    df[field+'_dm'] = tmp[:,1]
-                    df[field+'_star'] = tmp[:,4]    
-                    df[field+'_bh'] = tmp[:,2]               
+                elif tmp.shape[1]==5: #Gas,DM,_,Stars,BHs
+                    df[field+'gas'] = tmp[:,0]
+                    df[field+'dm'] = tmp[:,1]
+                    df[field+'star'] = tmp[:,4]    
+                    df[field+'bh'] = tmp[:,2]               
             else:
                 df[field] = tmp
+
+def read_tng_hih2(filename):
+    df=pd.DataFrame()
+    masses = ['m_h2_GD14_map','m_h2_GD14_vol','m_h2_GK11_map',
+                'm_h2_GK11_vol','m_h2_K13_map','m_h2_K13_vol',
+                'm_h2_L08_map','m_h2_S14_map','m_h2_S14_vol',
+                'm_hi_GD14_map','m_hi_GD14_vol','m_hi_GK11_map',
+                'm_hi_GK11_vol','m_hi_K13_map','m_hi_K13_vol',
+                'm_hi_L08_map','m_hi_S14_map','m_hi_S14_vol']
+    with h5py.File(filename) as f:
+        df['id_subhalo'] = (f['id_subhalo'][()]).astype(int)
+        df['is_primary'] = (f['is_primary'][()]).astype(bool)
+        #using GK11 as default model
+        df['SubhaloMHI'] = f['m_hi_GK11_vol'][()]
+        df['SubhaloMH2'] = f['m_h2_GK11_vol'][()]
+
+    return df
+
+def read_tng_match(filename, snapshot=99):
+    '''this loads the match ids from tng hydro to dmo for a given snapshot.
+        Note all ids are stored in one file'''
+    #contains all snapshots
+    df = pd.DataFrame()
+    fields = ['SubhaloIndexDark_LHaloTree', 'SubhaloIndexDark_Lagrange', 
+              'SubhaloIndexDark_SubLink', 'SubhaloSnapDark_Lagrange']
+    fields = ['SubhaloIndexDark_LHaloTree', 'SubhaloIndexDark_SubLink']
+    snap='Snapshot_{:2}/'.format(snapshot) #need to allow this to be set from args
+    with h5py.File(filename) as f:
+        for field in fields:
+            df[field] = f[snap+field][()]
+
+    return df
 
 #functions for loading the santa cruz semianalytic catalogs
 def load_scsam_halos(base_path, snapshot=99, N=5):
@@ -162,7 +196,6 @@ def load_sim_halos(base_path, snapshot=99):
     for f in radii_fields:
             df[f] = df[f] / hubble_value
 #    df['GroupBHMdot'] = (tng_mass_unit/ 0.978) * df['GroupBHMdot'] #Msun/Gyr
-    print(df.columns.values)
     return df
 
 
@@ -182,9 +215,12 @@ def load_sim_galaxies(base_path, snapshot=99):
     spins = subs.pop('SubhaloSpin')
     df = pd.DataFrame(subs)
     df['SubhaloRgas'] = radii[:, 0] * scale_factor / hubble_value 
+#    df['SubhaloRhalo'] = radii[:, 1] * scale_factor / hubble_value 
     df['SubhaloRstar'] = radii[:, 4] * scale_factor/ hubble_value
     df['SubhaloMgas'] = masses[:, 0] * tng_mass_unit / hubble_value
+#    df['SubhaloMdark'] = masses[:, 1] * tng_mass_unit / hubble_value
     df['SubhaloMstar'] = masses[:, 4] * tng_mass_unit / hubble_value
+    #SubhaloMass should equal Subhalo(Mgas+Mdark+Mstar+BHMass)
     pos_field = ['X', 'Y', 'Z']
     vel_field = ['Vx', 'Vy', 'Vz']
     spin_field = ['Jx', 'Jy', 'Jz']
@@ -198,7 +234,6 @@ def load_sim_galaxies(base_path, snapshot=99):
         df[f] = df[f] * tng_mass_unit / hubble_value
 
     df['SubhaloVmaxRad'] = df['SubhaloVmaxRad'] * scale_factor/hubble_value
-    print(df.columns.values)
     return df
 
 def load_sim_gals_and_halos(base_path,snapshot=99):
@@ -227,47 +262,100 @@ def load_sim_gals_and_halos(base_path,snapshot=99):
     radii_fields = ['Group_R_Crit200','Group_R_TopHat200']
     for f in radii_fields:
         df[f] = halos[f][df['SubhaloGrNr']] / hubble_value
+
+    #add post processing fields
+    post_dir=base_path[0:base_path.rfind('output')]+'postprocessing/'
+    #match id to DMO runs
+    match_file = post_dir + 'subhalo_matching_to_dark.hdf5' 
+    df_match = read_tng_match(match_file)
+    df['SubhaloIndexDark_LHaloTree'] = df_match['SubhaloIndexDark_LHaloTree']
+    df['SubhaloIndexDark_SubLink'] = df_match['SubhaloIndexDark_SubLink']
+    #HI and H2 masses (only for subset of galaxies)
+    hih2_file = post_dir + 'hih2_galaxy_099.hdf5'
+    df_hih2 = read_tng_hih2(hih2_file)
+    mask = df_hih2['id_subhalo']
+    for field in df_hih2.columns.values:
+        if field !='id_subhalo':
+            df[field] = np.NaN
+            df.loc[mask,field] = df_hih2.loc[:,field]
+
     return df
 
 def load_sim_dmo(base_path,snapshot=99):
     '''load DMO halos from Illustris-TNG simulations (group and subhalo)'''
-    #first load group catalog
-    fields = ['GroupFirstSub','GroupMass','GroupNsubs','GroupPos','GroupVel',
-        'Group_M_Crit200','Group_M_Crit500','Group_M_Mean200','Group_M_TopHat200',
-        'Group_R_Crit200','Group_R_Crit500','Group_R_Mean200','Group_R_TopHat200']
-    halos = ilsim.groupcat.loadHalos(base_path, snapshot, fields=fields)
-    pos = halos.pop('GroupPos')
-    vel = halos.pop('GroupVel')
-    df_halos = pd.DataFrame(halos)
-    pos_field = ['X', 'Y', 'Z']
-    vel_field = ['Vx', 'Vy', 'Vz']
-    spin_field = ['Jx', 'Jy', 'Jz'] #for use with Subhalos
-    for i in range(3):
-        df_halos['Group' + pos_field[i]] = pos[:, i] /hubble_value #cMpc
-        df_halos['Group' + vel_field[i]] = vel[:, i]
- 
-    #second load subhalo catalog
-    fields = ['SubhaloHalfmassRad', 'SubhaloMass', 'SubhaloMassInMaxRad', 
-        'SubhaloParent', 'SubhaloPos', 'SubhaloSpin', 'SubhaloVel', 'SubhaloVelDisp', 
-        'SubhaloVmax', 'SubhaloVmaxRad']
-    subs = ilsim.groupcat.loadSubhalos(base_path, snapshot, fields=fields)
+    #first load subhalo catalog
+    fields = ['SubhaloGrNr', 'SubhaloMass', 'SubhaloParent', 'SubhaloPos', 
+        'SubhaloSpin', 'SubhaloVel', 'SubhaloVelDisp', 'SubhaloVmax', 'SubhaloVmaxRad']
+    subs = ilsim.groupcat.loadSubhalos(base_path, snapshot,fields=fields)
+    #pop out fields that are more than 1D
+    count = subs.pop('count') # this is the number of subs
     pos = subs.pop('SubhaloPos')
     vel = subs.pop('SubhaloVel')
     spins = subs.pop('SubhaloSpin')
-    df_subs = pd.DataFrame(subs)
+    df = pd.DataFrame(subs)
+    pos_field = ['X', 'Y', 'Z']
+    vel_field = ['Vx', 'Vy', 'Vz']
+    spin_field = ['Jx', 'Jy', 'Jz']
     for i in range(3):
-        df_subs['Subhalo' + pos_field[i]] = pos[:, i] / hubble_value #cMpc
-        df_subs['Subhalo' + vel_field[i]] = vel[:, i]
-        df_subs['Subhalo' + spin_field[i]] = spins[:, i] / hubble_value
-    #join the two
-    df = df_halos.join(df_subs, on='GroupFirstSub', rsuffix='_s')
-    mass_fields = ['Group_M_Crit200','Group_M_Crit500','Group_M_Mean200','Group_M_TopHat200',
-        'GroupMass', 'SubhaloMass','SubhaloMassInMaxRad']
-    radii_fields = ['Group_R_Crit200','Group_R_Crit500','Group_R_Mean200','Group_R_TopHat200']
+        df['Subhalo' + pos_field[i]] = pos[:, i]  # cMpc/h
+        df['Subhalo' + vel_field[i]] = vel[:,i]
+        df['Subhalo' + spin_field[i]] = spins[:, i] / hubble_value
+
+    df['SubhaloMass'] = df['SubhaloMass'] * tng_mass_unit / hubble_value
+    df['SubhaloVmaxRad'] = df['SubhaloVmaxRad'] * scale_factor/hubble_value
+    
+    #now load halo catalog
+    fields = ['GroupFirstSub','GroupMass','GroupNsubs',
+        'GroupPos','GroupVel','Group_M_Crit200', 'Group_M_TopHat200', 
+        'Group_R_Crit200', 'Group_R_TopHat200']
+
+    halos = ilsim.groupcat.loadHalos(base_path, snapshot, fields=fields)
+    #identify central galaxies
+    Nhalos = halos.pop('count')
+    central = np.zeros((df.shape)[0], dtype='int')
+    central[halos['GroupFirstSub']] = 1
+    df['SubhaloCentral'] = central
+    pos = halos.pop('GroupPos')
+    vel = halos.pop('GroupVel')
+    pos_field = ['X', 'Y', 'Z']
+    vel_field = ['Vx', 'Vy', 'Vz']
+    df['GroupNsubs'] = halos['GroupNsubs'][df['SubhaloGrNr']]
+    for i in range(3):
+        df['Group' + pos_field[i]] = pos[df['SubhaloGrNr'], i] #cMpc
+        df['Group' + vel_field[i]] = vel[df['SubhaloGrNr'], i]
+    
+    mass_fields = ['GroupMass', 'Group_M_Crit200', 'Group_M_TopHat200']
     for f in mass_fields:
-        df[f] = df[f] * tng_mass_unit / hubble_value
+        df[f] = halos[f][df['SubhaloGrNr']] * tng_mass_unit / hubble_value
+    radii_fields = ['Group_R_Crit200','Group_R_TopHat200']
     for f in radii_fields:
-        df[f] = df[f] / hubble_value
+        df[f] = halos[f][df['SubhaloGrNr']] / hubble_value
+ 
+    return df
+
+def load_sim_and_dmo(sim_path,dmo_path, match = 'LHalo'):
+    '''load the simulation with matched dmo halos'''
+    df_sim = load_sim_gals_and_halos(sim_path,snapshot=99)
+    df_dmo = load_sim_dmo(dmo_path,snapshot=99)
+    if match=='LHalo':
+        match_idx = 'SubhaloIndexDark_LHaloTree'
+    elif match=='SubLink':
+        match_idx = 'SubhaloIndexDark_SubLink'
+    else:
+        print('match set to unkonwn value')
+        exit(1)
+
+    mask = df_sim[match_idx] != -1
+    print('Fraction of all subhalos with a match {:.3f}'.format(mask.sum()/len(mask)))
+#    i = 10000
+#    print(df_sim.loc[i,'SubhaloMass']/1.e11)
+#    idx = df_sim.loc[i,'SubhaloIndexDark_LHaloTree']
+#    print(df_dmo.loc[idx,'SubhaloMass']/1.e11)
+#    exit(1)
+    df = df_sim.loc[mask,:].copy()
+    for field in list(df_dmo):
+        df[field+'_dmo'] = df_dmo[field][df[match_idx]]
+    
     return df
 
 def join_sam_and_sim(df_sam, df_sim):
@@ -288,6 +376,9 @@ def center_distance(df, type='sim'):
     elif type=='lgal':
         p1name = ['PosX','PosY','PosZ']
         p2name = ['SubhaloPosX', 'SubhaloPosY', 'SubhaloPosZ']
+    elif type=='dmo':
+        p1name = ['SubhaloX', 'SubhaloY', 'SubhaloZ']
+        p2name = ['SubhaloX_dmo', 'SubhaloY_dmo', 'SubhaloZ_dmo']
     else:
         print('Not a valid type')
         return
@@ -336,21 +427,33 @@ def main(args):
 #                'HalopropFoFIndex_DM', 'HalopropFoFIndex_FP'])
             df_sam.to_hdf(f'all_tng{args.boxsize}-sam.h5', key='s', mode='w')
       
-    if args.sim:
+    if args.sim and not args.dmo:
         df_sim = load_sim_gals_and_halos(args.sim, snapshot = args.snapshot)
-        df_sim = remove_columns(df_sim, ['SubhaloGrNr', 'SubhaloParent'])
+        df_sim = df_sim[df_sim['SubhaloFlag']==True]
+        df_sim = remove_columns(df_sim, ['SubhaloFlag','SubhaloGrNr', 'SubhaloParent'])
         print('sim catalog: ', df_sim.shape)
         if args.tests:
             print(df_sim.columns.values)
             cents = df_sim['SubhaloCentral']  == True
             print(np.max(center_distance(df_sim[cents], type='sim')))
         
-        df_sim['SubhaloVvir'] = np.sqrt(G_Msunkpc*df_sim['Group_M_Crit200']/df_sim['Group_R_Crit200'])
+#        df_sim['SubhaloVvir'] = np.sqrt(G_Msunkpc*df_sim['Group_M_Crit200']/df_sim['Group_R_Crit200'])
         df_sim.to_hdf(f'all_tng{args.boxsize}-sim.h5', key='s', mode='w')
           
+    if args.dmo and not args.sim:
+        df_dmo = load_sim_dmo(args.dmo)
+        df_dmo = remove_columns(df_dmo, ['SubhaloGrNr', 'SubhaloParent'])
+        if args.tests:
+            print(df_dmo.columns.values)
+            cents = df_dmo['SubhaloCentral']  == True
+            print(np.max(center_distance(df_dmo[cents], type='sim')))
+#        df_dmo = remove_columns(df_dmo, ['GroupFirstSub'])
+        df_dmo.to_hdf(f'all_tng{args.boxsize}-dmo.h5', key='s', mode='w')
+
     if args.lgal and args.dmo:
         df_lgal = load_lgal_galaxies(args.lgal)
         df = join_lgal_dmo(df_lgal,args.dmo)
+
         if args.tests:
             centrals = df['Type']==0
             print('max center distance {}'.format(np.max(center_distance(df[centrals],type='lgal'))))
@@ -359,16 +462,30 @@ def main(args):
         df = remove_columns(df, ['SubhaloIndex_TNG-Dark','VelX', 'VelY','VelZ',
             'SubhaloVelX', 'SubhaloVelY','SubhaloVelZ', 'SubhaloVmax'])
         df.to_hdf(f'all_tng{args.boxsize}-lgal.h5',  key='s', mode='w')
-    elif args.dmo:
-        df_dmo = load_sim_dmo(args.dmo)
-        df_dmo = remove_columns(df_dmo, ['GroupFirstSub'])
-        df_dmo.to_hdf(f'all_tng{args.boxsize}-dmo.h5', key='s', mode='w')
+
+    if args.sim and args.dmo:
+        df = load_sim_and_dmo(args.sim, args.dmo, match=args.match)
+        df = df[df['SubhaloFlag']==True]
+        df = remove_columns(df, ['SubhaloFlag', 'SubhaloGrNr', 'SubhaloParent',
+            'SubhaloIndexDark_LHaloTree', 'SubhaloIndexDark_SubLink', 'is_primary',
+            'SubhaloGrNr_dmo', 'SubhaloParent_dmo'])
+        if args.tests:
+            print(df.columns.values)
+            cents = df['SubhaloCentral']  == True
+            print('max center distance {}'.format(np.max(center_distance(df[cents],type='dmo'))))
+        df = remove_columns(df, ['SubhaloX', 'SubhaloVx', 'SubhaloY',
+            'SubhaloVy','SubhaloZ', 'SubhaloVz', 'GroupX', 'GroupVx','GroupY', 
+            'GroupVy', 'GroupZ', 'GroupVz',
+            'SubhaloX_dmo', 'SubhaloVx_dmo','SubhaloY_dmo','SubhaloVy_dmo',
+            'SubhaloZ_dmo', 'SubhaloVz_dmo','GroupX_dmo', 'GroupVx_dmo', 
+            'GroupY_dmo', 'GroupVy_dmo', 'GroupZ_dmo', 'GroupVz_dmo'])
+        df.to_hdf(f'all_tng{args.boxsize}-match{args.match}.h5', key='s',mode='w')
 
     if args.sam and args.sim:
         df = join_sam_and_sim(df_sam, df_sim)
         df = remove_columns(df, ['GalpropSubfindIndex_DM', 'GalpropSubfindIndex_FP',
             'HalopropFoFIndex_DM', 'HalopropFoFIndex_FP'])
-        df.to_hdf('all_tng-match.h5', key='s', mode='w')
+        df.to_hdf(f'all_tng{args.boxsize}-match-sam.h5', key='s', mode='w')
         if args.tests:
             print(df.columns.values)
             print('max center distance {}'.format(np.max(center_distance(df, type='gals'))))
@@ -379,8 +496,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Creates pandas datafame from TNG galaxy catalogs.')
     parser.add_argument('--sam', help='Path to the SAM files, will not read if not set')
     parser.add_argument('--sim', help='Path to simulation files, will not read if not set.')
-    parser.add_argument('--dmo', help='Path to subfind DMO files, will match with SAM if set')
+    parser.add_argument('--dmo', help='Path to subfind DMO files, will match with simulation if set')
     parser.add_argument('--lgal',help='Path to Lgalaxies SAM file same as to simulation, DMO must also be set')
+    parser.add_argument('--match', type=str, default = 'LHalo',
+                        help='match the simulation to the dmo using LHalo or SubLink')
     Type = parser.add_mutually_exclusive_group()
     Type.add_argument('--halos', action='store_true', default=True, help='Create dataframe using halos (centrals only)')
     Type.add_argument('--gals', action='store_true', default=False, help='Create dataframe using galaxies (satellites included)')

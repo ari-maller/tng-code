@@ -93,26 +93,54 @@ def half_mass_radius(Md,Rd,Mb,Rb,tol=1.e-6,figure=False):
         plt.show()
     return half_radius
 
-def main(df, plots=False):
-
+def main(df, type, plots=False):
+    '''add some fields to tng based data sets'''
     column_names = df.columns.values
-    if column_names[0] == 'BlackHoleMass': # LGALAXIES
+    if type == 'lgal': # LGALAXIES
         centrals= df['Type']==0
         mass_fields = ['M_Crit200','StellarMass','StellarDiskMass','StellarBulgeMass']
         spin_name = 'HaloSpin'
+        r50name='r50'
         vvir = velocity_circular(df['M_Crit200'],df['R_Crit200'])
         r50 = calculate_r50(df,['StellarDiskMass','StellarDiskRadius','StellarBulgeMass','BulgeSize'])
         df['StellarR50'] = r50
         spin = calculate_spin(df['SubhaloSpinX'], df['SubhaloSpinY'],df['SubhaloSpinZ'],
             df['Vvir'],df['R_Crit200'])
         df['HaloSpin'] = spin
-    elif column_names[0] == 'GalpropMBH':  #SC-SAM
+    elif type == 'sam':  #SC-SAM
         centrals = df['GalpropSatType']==0
         mass_fields = ['HalopropMvir','GalpropMstar','GalpropMdisk','GalpropMbulge']
         spin_name = 'HalopropSpin'
+        r50name='r50'
         df['GalpropMdisk'] = df['GalpropMstar'] - df['GalpropMbulge']
         r50 = calculate_r50(df,['GalpropMdisk','GalpropRdisk','GalpropMbulge','GalpropRbulge'])
         df['GalpropHalfmassRadius'] = r50
+    elif type=='sim' or type=='matchLHalo': #TNG simulations 
+        centrals = df['SubhaloCentral']==True
+        mass_fields = ['SubhaloMass','SubhaloMstar']
+        spin_name = 'GroupSpin'
+        r50name = 'SubhaloRstar'
+        mass_defs = ['TopHat200','Crit200'] #more can be added
+        for mdef in mass_defs:
+            vvir = velocity_circular(df['Group_M_'+mdef],df['Group_R_'+mdef])
+            df['Group_V_'+mdef] = vvir
+        #there is an incosistency here thet J is for subhalo while R,V for Group
+        spin = calculate_spin(df['SubhaloJx'][centrals], df['SubhaloJy'][centrals],
+                            df['SubhaloJz'][centrals], df['Group_V_TopHat200'][centrals],
+                            df['Group_R_TopHat200'][centrals])
+        df['GroupSpin'] = 0
+        df.loc[centrals,'GroupSpin'] = spin
+        print('Spins are set to zero for satellites.')
+    if type=='matchLHalo':
+        mass_defs = ['TopHat200_dmo','Crit200_dmo'] #more can be added
+        for mdef in mass_defs:
+            vvir = velocity_circular(df['Group_M_'+mdef],df['Group_R_'+mdef])
+            df['Group_V_'+mdef] = vvir
+        spin = calculate_spin(df['SubhaloJx_dmo'][centrals], df['SubhaloJy_dmo'][centrals],
+            df['SubhaloJz_dmo'][centrals], df['Group_V_TopHat200_dmo'][centrals],
+            df['Group_R_TopHat200_dmo'][centrals])
+        df['GroupSpin_dmo'] = 0
+        df.loc[centrals,'GroupSpin_dmo'] = spin
     else:
         print('failed to detect file type')
         exit(1)
@@ -123,11 +151,11 @@ def main(df, plots=False):
     if 'Vvir' in column_names:
         print('vvir max diff {:4f} km/s'.format(np.max(df['Vvir']-vvir)))
     if plots:
-        plt.scatter(np.log10(df[mass_fields[1]][centrals]),np.log10(r50[centrals]),s=1,marker='.')
-        plt.ylim([-0.5,1.5])
-        plt.xlabel('log Stellar Mass')
-        plt.ylabel(r'log $R_{50}$')
-        plt.show()
+#        plt.scatter(np.log10(df[mass_fields[1]][centrals]),np.log10(r50name[centrals]),s=1,marker='.')
+#        plt.ylim([-0.5,1.5])
+#        plt.xlabel('log Stellar Mass')
+#        plt.ylabel(r'log $R_{50}$')
+#        plt.show()
   
         plt.hist(df[spin_name][centrals],range=[0,0.1],bins=100)
         plt.xlabel('Spin Parameter Bullock')
@@ -152,13 +180,19 @@ if __name__=='__main__':
     df = pd.read_hdf(args.filename)
     fname=args.filename
     bs = fname[fname.find('tng')+3:fname.rfind('-')]
-    if args.filename=='tng100-lgal.h5':
+    type = fname[fname.find('-')+1:fname.rfind('.')]
+    print(bs,type)
+    if type=='lgal': #add halfmass radius, spin and Vvir
         mass = 'StellarMass'
         mcut={'50':1.e6,'100':1.e7,'300':1.e8}
-    else:
+    elif type=='sam':#add halfmass radius
         mass = 'GalpropMstar'  
         mcut={'50':1.e6,'100':1.e7,'300':1.e8}
-    
+    elif type=='sim' or type=='matchLHalo': #add spin and Vvir
+        mass = 'SubhaloMstar'
+        mcut = {'50':1.e8,'100':1.e9,'300':1.e10}
+    else:
+        print("error: {type} is not a known type")
     df_new = (df[df[mass] > mcut[bs]]).copy()
-    main(df_new, plots=args.plots)
+    main(df_new, type, plots=args.plots)
     

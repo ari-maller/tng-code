@@ -4,6 +4,7 @@ import pandas as pd
 
 def main(args):
     df = pd.read_hdf(args.filename)
+    print(df.shape)
     if args.describe:
         print(df[args.describe].describe())
     else:
